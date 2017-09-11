@@ -1,0 +1,153 @@
+关于tick
+	unity -> Root.Update -> Game.UpdatePlay 
+	-> tickManager.TickManagerUpdate 
+	-> TickManager.DoSingleTick 
+		这里有个技巧，因为并不知道unity会以怎样的频率调用Update
+		所以每一次调用并不总是只调用一次DoSingleTick
+		会设定一个频率，每过多少现实世界时间调用一次Tick
+		不过有时候电脑比较卡，那时候可能两次Update的调用中间隔很久(1h啥的2333)，
+		所以要设定一个上限，到了这个限度就不再调用Tick
+	-> Map.MapPreTick 
+		更新item's availability and haulables, roofArea, wind, temperature
+	-> TickList.Tick 
+		不同的TickList有不同的频率(Normal, Rare, Long)
+		将需要tick的thing注册(register)上对应频率的TickList
+		TickList会将注册的thing散列到与自己频率大小一样的表的bucket中，留待处理
+		每一次被调用Tick的时候，TickList就会调用上表中按序下来的对应的bucket中所有thing的Tick
+		举个例子，
+			对于Rare频率(250)的的TickList，
+			注册一个thing后，这个thing就会进入250个bucket中的一个，例如，如果是13号bucket
+			那么每当TickManager.TicksGame%TickList.TickInterval == 13，那么这个thing的Tick就会被调用
+	-> ThingWithComps.Tick
+	-> ThingComp.CompTick
+		class Thing本身只包含位置信息等不需要计时的固有信息，
+		是在装上comp之后才会经时间产生变化，
+		故而ThingWithComps的Tick的本质就是对各个ThingComp的Tick
+	
+
+关于AI
+	基本时序——
+		... -> TickList.Tick -> Pawn.Tick 
+		-> JobTrackerTick 
+			-> DetermineNextConstantThinkTreeJob 每隔一段时间(IsHashIntervalTick)
+				使用该pawn的ConstantThinkTree来试着产生Job
+				如果Job生成了并且可用，离开当前Lord，StartJob
+			-> EndCurrentJob 当该工作会被敌人接近打断时
+			-> curDriver.DriverTick 如果curJob存在
+				-> ReadyForNextToil 如果当前Toil结束、不存在、无法执行
+					-> TryActuallyStartNextToil
+						-> CurToil.CleanUp 
+						-> JobDriver.CurToilIndex++
+						-> curDriver.EndJobWith 如果当前job已经完成了
+						-> CurToil.initAction 如果还没完成
+						-> ReadyForNextToil 如果新的Toil是Instant的
+				-> CurToil.tickAction 否则
+			-> TryFindAndStartJob 如果curJob没了，并且pawn还能doJob
+				-> 尝试获取可用Job，一个个试过去
+					-> thinkTreeConstant
+					-> jobQueue
+					-> thinkMainTree
+				-> 离开当前Lord
+				-> StartJob
+				
+	相关概念——
+		Toil
+			小人做的事情的最小单元是Toil
+			每一个Toil都会有自己的一套Action
+			这套Action会分别在对应的时刻被调用
+			
+		Job
+			小人做的任何概念上的事情（也就是你觉得是一件事情的事情，吃饭、dolov啥的）
+			不过Job本身不做任何事情，就像是Thing本身不做任何事情一样
+			它只是提供了做“事情”需要的信息（吃啥、喝啥、做爱对象啥的）
+			就和Thing提供了def和位置等信息一样
+		
+		JobDriver
+			实际干活的存在
+			Job与JobDriver一一对应
+			不过，多个JobDef可共享一个JobDriverDef，反之不可
+			JobDriver由一串Toil组成
+			JobDriver会根据Job给出的信息来决定该给出怎样的Toil
+			
+		JobTracker
+			万恶之源x，小人会干什么事情都是由它每一次tick的时候决定的
+			会始终保持一个JobDriver
+			会在一定时间间隔后或者当前Job完成后进行思考来寻找新的Job
+			
+		---Think---
+		ThinkNode
+			以各种方式试图产生一个Job
+			
+		ThinkTree
+			小人的思考决策树，其实就是ThinkNode_Priority
+			
+		ThinkNode_Priority
+			对自己的子节点一个个进行尝试，直到有一个生成了可用的Job
+			
+		JobGiver
+			其实就是ThinkNode，是思考的一部分
+		
+		---Duty Lord---
+		ThinkNode_Duty & Duty
+			当小人有Duty并且思考尝试到了ThinkNode_Duty时
+			尝试使用Duty获取思考树来获取Job
+			如果生成可用Job失败，就进入徘徊模式
+			每个小人至多只有一个Duty
+		
+		LordToil
+			安排所属小人的Duty的最小单元
+			
+		Transition
+			连接LordToil的“边”
+			边上可加Trigger来做条件，当满足条件时，从source到Target
+			为有向边
+			可有多重边
+			
+		StateGraph
+			由LordToil与Transition组成的有限状态机
+		
+		LordJob
+			实际给出指令的管家先生~
+			产生一个StateGraph，交由Lord来使用
+		
+		Lord
+			指挥小人去干各种事情的地主
+			每个地主都有且仅有一个LordJob
+			每个地主都有自己的一群小人，地主只能指挥这些小人
+			每个小人至多只从属于一个地主
+		
+		---Work---
+		WorkGiver
+			类似于ThinkNode，只是不直接在思考树中，而是由ThinkNode_Work驱动
+			
+		WorkType
+			每一个WorkGiver都属于一种WorkType
+			也就是“医生”，“搬运”，“狩猎”之类的
+			
+		priorityWork
+			也就是游戏里面的“优先xxx”
+			指定了一个工作对象(xxx)以及WorkType，并不指定具体Job
+		
+		ThinkNode_Work
+			先试着根据priorityWork生成Job，来完成优先工作
+			如果没有优先工作，那么再根据pawn可以进行的workType寻找WorkGiver
+			根据WorkGiver是否紧急以及优先级进行排序，再一个个尝试生成Job
+		
+	综述——
+		小人一切行动都是基于Job的，虽然最小单元是Toil，但是概念上Job是最根本的
+		JobDriver是最根本的执行单位
+		Duty, Work都是用来辅助生成Job的
+		ThinkNode是产生Job的根本
+		JobTrackerTick是“思考”进行的地方
+		
+		Lord是一个拟人的给小人发号施令的存在
+		LordJob是实际的给出指令的存在
+			它有自己的“思考”，是以有限状态机的形式进行的
+			指令是以Duty的形式给出的
+			
+		WorkGiver与JobGiver类似，都是生成Job的，但层次不同
+		WorkGiver是辅助JobGiver_Work生成Job的存在
+		JobGiver_Work委托给适合的WorkGiver来生成Job
+			
+		
+	
